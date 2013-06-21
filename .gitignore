@@ -153,3 +153,4 @@ regressions/ck_rwcohort/benchmark/ck_rp.LATENCY
 regressions/ck_rwcohort/benchmark/ck_rp.THROUGHPUT
 regressions/ck_rwcohort/benchmark/ck_wp.LATENCY
 regressions/ck_rwcohort/benchmark/ck_wp.THROUGHPUT
+regressions/ck_dflock/validate/validate
