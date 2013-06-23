@@ -83,7 +83,7 @@ ck_dflock_next_bin(struct ck_dflock *lock)
 {
 	uint32_t start_bin, bin, u, occupied;
 
-	occupied = ck_pr_load_32(&lock->occupied_bins);
+	occupied = ck_pr_load_uint(&lock->occupied_bins);
 	if (occupied == 0) {
 		return -1;
 	}
@@ -114,9 +114,10 @@ ck_dflock_lock(struct ck_dflock *lock, uint64_t deadline)
 	printf("setting bit %" PRIu32 "\n", bin_index);
 	/* set occupied bit for appropriate bin */
 	do {
-		set_bins = ck_pr_load_32(&lock->occupied_bins);
+		set_bins = ck_pr_load_uint(&lock->occupied_bins);
 		bin_update = set_bins | (1 << bin_index);
-	} while (ck_pr_cas_32(&lock->occupied_bins, set_bins, bin_update) == false);
+	} while (ck_pr_cas_uint(&lock->occupied_bins, set_bins, bin_update) == false);
+	printf("old bitmask: %" PRIu32 "\n", set_bins);
 	printf("new bitmask: %" PRIu32 "\n", bin_update);
 
 	/* acquire local lock */
@@ -139,7 +140,7 @@ ck_dflock_lock(struct ck_dflock *lock, uint64_t deadline)
 	 * now that we have the overall lock, make a note of which bin acquired it
 	 * so that we know what to deactivate upon unlocking
 	 */
-	ck_pr_store_32(&lock->last_used_bin, bin_index);
+	ck_pr_store_uint(&lock->last_used_bin, bin_index);
 	ck_pr_fence_store();
 
 	return;
@@ -171,7 +172,7 @@ ck_dflock_unlock(struct ck_dflock *lock)
 			set_bins = ck_pr_load_32(&lock->occupied_bins);
 			bin_update = set_bins & ~(1 << lock->last_used_bin);
 		} while (ck_pr_cas_32(&lock->occupied_bins, set_bins, bin_update) == false);*/
-		ck_pr_or_32(&lock->occupied_bins, ~(1 << lock->last_used_bin));
+		ck_pr_and_uint(&lock->occupied_bins, ~(1 << lock->last_used_bin));
 	}
 
 	/* signal the next bin if applicable */
