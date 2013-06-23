@@ -7,8 +7,6 @@
 #include <ck_dflock.h>
 #include <ck_pr.h>
 
-#include "../../common.h"
-
 #define ITERATE 100000
 #define INTERVAL 1000
 
@@ -23,21 +21,15 @@ thread(void *context CK_CC_UNUSED)
 {
 	unsigned int i = ITERATE, j;
 	unsigned int delay = (timeframe += INTERVAL);
-	struct timeval tv;
+	uint64_t deadline;
 
 	if (aff_iterate(&a) != 0) {
 		ck_error("ERROR: Could not affine thread\n");
-		exit(EXIT_FAILURE);
 	}
 
 	while (i--) {
-		gettimeofday(&tv, NULL);
-		tv.tv_usec += delay;
-		if (tv.tv_usec > 1000000) {
-			tv.tv_sec += tv.tv_usec / 1000000;
-			tv.tv_usec = tv.tv_usec % 1000000;
-		}
-		ck_dflock_lock(&lock, &tv);
+		deadline = rdtsc() + delay;
+		ck_dflock_lock(&lock,deadline);
 
 		ck_pr_inc_uint(&locked);
 		ck_pr_inc_uint(&locked);
@@ -54,7 +46,6 @@ thread(void *context CK_CC_UNUSED)
 
 		if (j != 10) {
 			ck_error("ERROR (WR): Race condition (%u)\n", j);
-			exit(EXIT_FAILURE);
 		}
 
 		ck_pr_dec_uint(&locked);
@@ -86,32 +77,27 @@ main(int argc, char **argv)
 
 	if (argc != 3) {
 		ck_error("Usage: validate <number of threads> <affinity delta>\n");
-		exit(EXIT_FAILURE);
 	}
 
 	nthr = atoi(argv[1]);
 	if (nthr == 0) {
 		ck_error("ERROR: Number of threads must be greater than 0\n");
-		exit(EXIT_FAILURE);
 	}
 
 	threads = malloc(sizeof(pthread_t) * nthr);
 	if (threads == NULL) {
 		ck_error("ERROR: Could not allocate threads\n");
-		exit(EXIT_FAILURE);
 	}
 
 	a.delta = atoi(argv[2]);
 	if (a.delta == 0) {
 		ck_error("ERROR: Affinity delta must be greater than 0\n");
-		exit(EXIT_FAILURE);
 	}
 	a.request = 0;
 
 	for (i = 0 ; i < nthr ; ++i) {
 		if (pthread_create(threads + i, NULL, thread, NULL) != 0) {
 			ck_error("ERROR: Could not create thread %" PRIu64 "\n", i);
-			exit(EXIT_FAILURE);
 		}
 	}
 

@@ -5,7 +5,7 @@ OBJECTS=validate
 all: $(OBJECTS)
 
 validate: validate.c ../../../include/ck_dflock.h
-	$(CC) $(CFLAGS) -o validate validate.c
+	$(CC) $(CFLAGS) -o validate validate.c -g
 
 check: all
 	./validate `expr $(CORES) / 2` 2
