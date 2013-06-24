@@ -20,12 +20,22 @@
 #define CK_DFLOCK_DEFAULT_GRANULARITY 10000 /* in microseconds */
 #define CK_DFLOCK_ROUND_SIZE(L) ((L)->bin_granularity * CK_DFLOCK_BIN_COUNT)
 
+
+/* for debugging only */
+static char *
+to_binary(uint32_t x)
+{
+	char *s = malloc(sizeof(char) * 33);
+	for (unsigned int u = 0 ; u < 32 ; ++u) {
+		s[u] = (x & (1 << (31 - u))) ? '1' : '0';
+	}
+	return s;
+}
+
 struct ck_dflock_bin {
-	struct ck_spinlock_mcs *lock;
-	struct ck_spinlock_mcs *current_lock;
+	struct ck_spinlock_fas lock;
 	unsigned int active CK_CC_CACHELINE;
 };
-
 
 struct ck_dflock {
 	uint32_t occupied_bins CK_CC_CACHELINE;
@@ -45,9 +55,17 @@ struct ck_dflock {
 CK_CC_INLINE static void
 ck_dflock_init(struct ck_dflock *lock, uint32_t granularity)
 {
+	unsigned int u;
+	struct ck_dflock_bin *bin;
+
 	lock->bin_granularity = granularity;
 	lock->occupied_bins = 0;
-	memset(lock->bins, 0, sizeof(struct ck_dflock_bin) * CK_DFLOCK_BIN_COUNT);
+
+	for (u = 0 ; u < CK_DFLOCK_BIN_COUNT ; ++u) {
+		bin = lock->bins + u;
+		ck_spinlock_fas_init(&bin->lock);
+		bin->active = 0;
+	}
 }
 
 
@@ -84,6 +102,9 @@ ck_dflock_next_bin(struct ck_dflock *lock)
 	uint32_t start_bin, bin, u, occupied;
 
 	occupied = ck_pr_load_uint(&lock->occupied_bins);
+	char *b = to_binary(occupied);
+	printf("calculating next bin for bitmask %s\n", b);
+	free(b);
 	if (occupied == 0) {
 		return -1;
 	}
@@ -91,7 +112,7 @@ ck_dflock_next_bin(struct ck_dflock *lock)
 	start_bin = ck_dflock_compute_bin(lock, rdtsc());
 	for (u = 0 ; u < CK_DFLOCK_BIN_COUNT ; ++u) {
 		bin = (start_bin + u) % CK_DFLOCK_BIN_COUNT;
-		if (occupied & (1 << bin) != 0) {
+		if ((occupied & (1 << bin)) != 0) {
 			return bin;
 		}
 	}
@@ -106,7 +127,6 @@ ck_dflock_lock(struct ck_dflock *lock, uint64_t deadline)
 {
 	uint32_t bin_index, set_bins, bin_update;
 	struct ck_dflock_bin *bin;
-	struct ck_spinlock_mcs *thread_lock = malloc(sizeof(struct ck_spinlock_mcs));
 
 	bin_index = ck_dflock_compute_insert_bin(lock, deadline);
 	bin = lock->bins + bin_index;
@@ -117,14 +137,17 @@ ck_dflock_lock(struct ck_dflock *lock, uint64_t deadline)
 		set_bins = ck_pr_load_uint(&lock->occupied_bins);
 		bin_update = set_bins | (1 << bin_index);
 	} while (ck_pr_cas_uint(&lock->occupied_bins, set_bins, bin_update) == false);
-	printf("old bitmask: %" PRIu32 "\n", set_bins);
-	printf("new bitmask: %" PRIu32 "\n", bin_update);
+	char *b = to_binary(set_bins);
+	printf("old bitmask: %s\n", b);
+	free(b);
+	b = to_binary(bin_update);
+	printf("new bitmask: %s\n", b);
+	free(b);
 
 	/* acquire local lock */
 	printf("acquiring local lock %u...", bin_index);
-	ck_spinlock_mcs_lock(&bin->lock, thread_lock);
+	ck_spinlock_fas_lock(&bin->lock);
 	printf("done\n");
-	ck_pr_store_ptr(&bin->current_lock, thread_lock);
 
 	/* if another thread previously held the global lock... */
 	if (set_bins != 0) {
@@ -162,12 +185,10 @@ ck_dflock_unlock(struct ck_dflock *lock)
 	 */
 	ck_pr_store_uint(&bin->active, 0);
 	ck_pr_fence_store();
-	ck_spinlock_mcs_unlock(&bin->lock, ck_pr_load_ptr(&bin->current_lock));
-	free(bin->current_lock);
-	ck_pr_store_ptr(&bin->current_lock, NULL);
+	ck_spinlock_fas_unlock(&bin->lock);
 
 	/* if no other thread is waiting on the local lock, we can mark this bin as unused */
-	if (ck_spinlock_mcs_locked(&bin->lock) == false) {
+	if (ck_spinlock_fas_locked(&bin->lock) == false) {
 		/*do {
 			set_bins = ck_pr_load_32(&lock->occupied_bins);
 			bin_update = set_bins & ~(1 << lock->last_used_bin);
@@ -178,7 +199,10 @@ ck_dflock_unlock(struct ck_dflock *lock)
 	/* signal the next bin if applicable */
 	next_bin = ck_dflock_next_bin(lock);
 	if (next_bin >= 0) {
+		printf("awarding lock to bin %i\n", next_bin);
 		ck_pr_store_uint(&lock->bins[next_bin].active, 1);
+	} else {
+		printf("no next bin waiting\n");
 	}
 
 	return;
