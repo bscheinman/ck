@@ -98,11 +98,10 @@ ck_dflock_compute_insert_bin(struct ck_dflock *lock, uint64_t deadline)
 
 /* Returns -1 if no bin should be activated */
 CK_CC_INLINE static int
-ck_dflock_next_bin(struct ck_dflock *lock)
+ck_dflock_next_bin(struct ck_dflock *lock, uint32_t occupied)
 {
-	uint32_t start_bin, bin, u, occupied;
+	uint32_t start_bin, bin, u;
 
-	occupied = ck_pr_load_uint(&lock->occupied_bins);
 	if (occupied == 0) {
 		return -1;
 	}
@@ -130,31 +129,24 @@ ck_dflock_lock(struct ck_dflock *lock, uint64_t deadline)
 	bin = lock->bins + bin_index;
 
 	ck_pr_inc_uint(&bin->contention_count);
+	ck_pr_fence_memory();
 	ck_spinlock_fas_lock(&bin->lock);
+	ck_pr_fence_memory();
 	ck_pr_dec_uint(&bin->contention_count);
 
-	//printf("%u: setting bit %" PRIu32 "\n", gettid(), bin_index);
-	//printf("%u,%" PRIu32 "\n", gettid(), bin_index);
 	/* set occupied bit for appropriate bin */
 	do {
 		set_bins = ck_pr_load_uint(&lock->occupied_bins);
 		bin_update = set_bins | (1 << bin_index);
 	} while (ck_pr_cas_uint(&lock->occupied_bins, set_bins, bin_update) == false);
-	/*char *b = to_binary(set_bins);
-	printf("old bitmask: %s\n", b);
-	free(b);
-	b = to_binary(bin_update);
-	printf("new bitmask: %s\n", b);
-	free(b);*/
+	ck_pr_fence_memory();
 
 	/* if another thread previously held the global lock... */
 	if (set_bins != 0) {
 		/* ... then wait for bin to be activated */
-		//printf("waiting for active bit %" PRIu32 "...", bin_index);
 		while (ck_pr_load_uint(&bin->active) == 0) {
 			ck_pr_stall();
 		}
-		//printf("done\n");
 	}
 
 	/* 
@@ -173,26 +165,31 @@ ck_dflock_unlock(struct ck_dflock *lock)
 {
 	struct ck_dflock_bin *bin;
 	int next_bin;
+	uint32_t set_bins, bin_update;
 
 	bin = lock->bins + lock->last_used_bin;
 
 	ck_pr_store_uint(&bin->active, 0);
-	ck_pr_fence_store();
+	ck_pr_fence_memory();
 
 	/* if no other thread is waiting on the local lock, we can mark this bin as unused */
 	if (ck_pr_load_uint(&bin->contention_count) == 0) {
-		ck_pr_and_uint(&lock->occupied_bins, ~(1 << lock->last_used_bin));
+		do {
+			set_bins = ck_pr_load_uint(&lock->occupied_bins);
+			bin_update = set_bins & ~(1 << lock->last_used_bin);
+		} while (ck_pr_cas_uint(&lock->occupied_bins, set_bins, bin_update) == false);
+	} else {
+		bin_update = ck_pr_load_uint(&lock->occupied_bins);
 	}
+	ck_pr_fence_memory();
 
 	ck_spinlock_fas_unlock(&bin->lock);
+	ck_pr_fence_memory();
 
-	/* signal the next bin if applicable */
-	next_bin = ck_dflock_next_bin(lock);
+	/* as long as we didn't set the occupied word to 0, we need to signal the next bin */
+	next_bin = ck_dflock_next_bin(lock, bin_update);
 	if (next_bin >= 0) {
-		//printf("awarding lock to bin %i\n", next_bin);
 		ck_pr_store_uint(&lock->bins[next_bin].active, 1);
-	} else {
-		//printf("no next bin waiting\n");
 	}
 
 	ck_pr_fence_memory();
