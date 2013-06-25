@@ -23,7 +23,7 @@
 
 
 /* for debugging only */
-static char *
+/*static char *
 to_binary(uint32_t x)
 {
 	char *s = malloc(sizeof(char) * 33);
@@ -31,7 +31,7 @@ to_binary(uint32_t x)
 		s[u] = (x & (1 << (31 - u))) ? '1' : '0';
 	}
 	return s;
-}
+}*/
 
 struct ck_dflock_bin {
 	struct ck_spinlock_fas lock;
@@ -134,6 +134,7 @@ ck_dflock_lock(struct ck_dflock *lock, uint64_t deadline)
 	ck_pr_dec_uint(&bin->contention_count);
 
 	//printf("%u: setting bit %" PRIu32 "\n", gettid(), bin_index);
+	//printf("%u,%" PRIu32 "\n", gettid(), bin_index);
 	/* set occupied bit for appropriate bin */
 	do {
 		set_bins = ck_pr_load_uint(&lock->occupied_bins);
