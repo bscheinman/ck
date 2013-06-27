@@ -7,7 +7,9 @@
 #include <ck_dflock.h>
 #include <ck_pr.h>
 
-#define ITERATE 100000
+#include "../../common.h"
+
+#define ITERATE 10000000
 #define INTERVAL 1000
 
 static int nthr;
@@ -21,7 +23,7 @@ thread(void *context CK_CC_UNUSED)
 {
 	unsigned int i = ITERATE, j;
 	unsigned int delay = (timeframe += INTERVAL);
-	uint64_t deadline;
+	deadline_t deadline;
 
 	if (aff_iterate(&a) != 0) {
 		ck_error("ERROR: Could not affine thread\n");
@@ -29,7 +31,7 @@ thread(void *context CK_CC_UNUSED)
 
 	while (i--) {
 		deadline = rdtsc() + delay;
-		ck_dflock_lock(&lock,deadline);
+		ck_dflock_lock(&lock, deadline);
 
 		ck_pr_inc_uint(&locked);
 		ck_pr_inc_uint(&locked);
@@ -73,7 +75,7 @@ main(int argc, char **argv)
 	int i;
 
 	/* Aim for roughly 2 threads per bin */
-	ck_dflock_init(&lock, INTERVAL * 2);
+	ck_dflock_init(&lock, rdtsc, INTERVAL * 2);
 
 	if (argc != 3) {
 		ck_error("Usage: validate <number of threads> <affinity delta>\n");

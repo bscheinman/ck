@@ -6,15 +6,6 @@
 #include <ck_pr.h>
 #include <ck_spinlock.h>
 
-/*
- * If we end up keeping rdtsc, then we should move it to ck_pr.h.
- * It would probably be better to let the user define what they want their
- * deadline values to represent; they could pass to the initialization
- * method a pointer to a function that would return the current value for
- * their chosen deadline scheme.
- */
-#include "../regressions/common.h"
-
 /* In the future we can use macros to use 64 bins on 64-bit architectures */
 #define CK_DFLOCK_BIN_COUNT 32
 #define CK_DFLOCK_DEFAULT_GRANULARITY 10000
@@ -26,9 +17,13 @@ struct ck_dflock_bin {
 	unsigned int contention_count CK_CC_CACHELINE;
 };
 
+typedef uint64_t deadline_t;
+typedef deadline_t (* deadline_generator)(void);
+
 struct ck_dflock {
 	uint32_t occupied_bins CK_CC_CACHELINE;
 	uint32_t bin_granularity;
+	deadline_generator get_now;
 
 	/*
 	 * Used by unlock method to determine which local lock to unlock.
@@ -42,12 +37,13 @@ struct ck_dflock {
 
 
 CK_CC_INLINE static void
-ck_dflock_init(struct ck_dflock *lock, uint32_t granularity)
+ck_dflock_init(struct ck_dflock *lock, deadline_generator get_now, uint32_t granularity)
 {
 	unsigned int u;
 	struct ck_dflock_bin *bin;
 
 	lock->bin_granularity = granularity;
+	lock->get_now = get_now;
 	lock->occupied_bins = 0;
 
 	for (u = 0 ; u < CK_DFLOCK_BIN_COUNT ; ++u) {
@@ -63,16 +59,16 @@ ck_dflock_init(struct ck_dflock *lock, uint32_t granularity)
 
 
 CK_CC_INLINE static uint32_t 
-ck_dflock_compute_bin(struct ck_dflock *lock, uint64_t deadline)
+ck_dflock_compute_bin(struct ck_dflock *lock, deadline_t deadline)
 {
 	return (deadline % CK_DFLOCK_ROUND_SIZE(lock)) / lock->bin_granularity;
 }
 
 
 CK_CC_INLINE static uint32_t
-ck_dflock_compute_insert_bin(struct ck_dflock *lock, uint64_t deadline)
+ck_dflock_compute_insert_bin(struct ck_dflock *lock, deadline_t deadline)
 {
-	uint64_t now = rdtsc();
+	deadline_t now = lock->get_now();
 
 	if (now >= deadline) {
 		/* If the deadline has already passed then we should put it in the most immediate bin */
@@ -96,7 +92,7 @@ ck_dflock_next_bin(struct ck_dflock *lock, uint32_t occupied)
 		return -1;
 	}
 
-	start_bin = ck_dflock_compute_bin(lock, rdtsc());
+	start_bin = ck_dflock_compute_bin(lock, lock->get_now());
 	for (u = 0 ; u < CK_DFLOCK_BIN_COUNT ; ++u) {
 		bin = (start_bin + u) % CK_DFLOCK_BIN_COUNT;
 		if ((occupied & (1 << bin)) != 0) {
@@ -110,7 +106,7 @@ ck_dflock_next_bin(struct ck_dflock *lock, uint32_t occupied)
 
 
 CK_CC_INLINE static void 
-ck_dflock_lock(struct ck_dflock *lock, uint64_t deadline)
+ck_dflock_lock(struct ck_dflock *lock, deadline_t deadline)
 {
 	uint32_t bin_index, set_bins, bin_update;
 	struct ck_dflock_bin *bin;
