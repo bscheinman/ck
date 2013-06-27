@@ -2,36 +2,23 @@
 #define _CK_DFLOCK_H
 
 #include <inttypes.h>
-#include <stdbool.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/time.h>
-
-/* for debugging only */
-#include <stdio.h>
-#include <sys/types.h>
 
 #include <ck_pr.h>
 #include <ck_spinlock.h>
 
-/* If we end up keeping rdtsc, then we should move it to ck_pr.h */
+/*
+ * If we end up keeping rdtsc, then we should move it to ck_pr.h.
+ * It would probably be better to let the user define what they want their
+ * deadline values to represent; they could pass to the initialization
+ * method a pointer to a function that would return the current value for
+ * their chosen deadline scheme.
+ */
 #include "../regressions/common.h"
 
+/* In the future we can use macros to use 64 bins on 64-bit architectures */
 #define CK_DFLOCK_BIN_COUNT 32
-#define CK_DFLOCK_DEFAULT_GRANULARITY 10000 /* in microseconds */
+#define CK_DFLOCK_DEFAULT_GRANULARITY 10000
 #define CK_DFLOCK_ROUND_SIZE(L) ((L)->bin_granularity * CK_DFLOCK_BIN_COUNT)
-
-
-/* for debugging only */
-/*static char *
-to_binary(uint32_t x)
-{
-	char *s = malloc(sizeof(char) * 33);
-	for (unsigned int u = 0 ; u < 32 ; ++u) {
-		s[u] = (x & (1 << (31 - u))) ? '1' : '0';
-	}
-	return s;
-}*/
 
 struct ck_dflock_bin {
 	struct ck_spinlock_fas lock;
@@ -69,6 +56,9 @@ ck_dflock_init(struct ck_dflock *lock, uint32_t granularity)
 		bin->active = 0;
 		bin->contention_count = 0;
 	}
+
+	ck_pr_fence_memory();
+	return;
 }
 
 
@@ -129,9 +119,7 @@ ck_dflock_lock(struct ck_dflock *lock, uint64_t deadline)
 	bin = lock->bins + bin_index;
 
 	ck_pr_inc_uint(&bin->contention_count);
-	ck_pr_fence_memory();
 	ck_spinlock_fas_lock(&bin->lock);
-	ck_pr_fence_memory();
 	ck_pr_dec_uint(&bin->contention_count);
 
 	/* set occupied bit for appropriate bin */
@@ -147,6 +135,12 @@ ck_dflock_lock(struct ck_dflock *lock, uint64_t deadline)
 		while (ck_pr_load_uint(&bin->active) == 0) {
 			ck_pr_stall();
 		}
+	} else {
+		/* 
+		 * Otherwise set the active bit for this bin in case we keep
+		 * control here upon unlocking.
+		 */
+		ck_pr_store_uint(&bin->active, 1);
 	}
 
 	/* 
@@ -169,9 +163,6 @@ ck_dflock_unlock(struct ck_dflock *lock)
 
 	bin = lock->bins + lock->last_used_bin;
 
-	ck_pr_store_uint(&bin->active, 0);
-	ck_pr_fence_memory();
-
 	/* if no other thread is waiting on the local lock, we can mark this bin as unused */
 	if (ck_pr_load_uint(&bin->contention_count) == 0) {
 		do {
@@ -181,18 +172,18 @@ ck_dflock_unlock(struct ck_dflock *lock)
 	} else {
 		bin_update = ck_pr_load_uint(&lock->occupied_bins);
 	}
-	ck_pr_fence_memory();
+
+	next_bin = ck_dflock_next_bin(lock, bin_update);
+	if (next_bin != (int)(lock->last_used_bin)) {
+		ck_pr_store_uint(&bin->active, 0);
+		if (next_bin >= 0) {
+			ck_pr_store_uint(&lock->bins[next_bin].active, 1);
+		}
+	}
 
 	ck_spinlock_fas_unlock(&bin->lock);
 	ck_pr_fence_memory();
 
-	/* as long as we didn't set the occupied word to 0, we need to signal the next bin */
-	next_bin = ck_dflock_next_bin(lock, bin_update);
-	if (next_bin >= 0) {
-		ck_pr_store_uint(&lock->bins[next_bin].active, 1);
-	}
-
-	ck_pr_fence_memory();
 	return;
 }
 
